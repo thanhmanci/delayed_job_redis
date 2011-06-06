@@ -8,6 +8,9 @@ module Delayed
         include Delayed::Backend::Base
         include Toy::Store
         
+        cattr_accessor :default_queue
+        self.default_queue = "default"
+        
         attribute :priority, Integer
         attribute :attempts, Integer
         attribute :handler, String
@@ -21,6 +24,7 @@ module Delayed
         before_create do |o|
           o.attempts   = 0
           o.priority ||= 0
+          o.queue    ||= self.class.default_queue
           o.run_at   ||= self.class.db_time_now
           self.class.push(o)
         end
@@ -59,6 +63,7 @@ module Delayed
         end
 
         def self.redis
+          raise "Delayed::Job.redis is not set. A redis instance or connections string must be provided." unless @redis
           @redis
         end
         

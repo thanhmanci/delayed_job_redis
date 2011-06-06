@@ -1,18 +1,29 @@
+require 'toystore'
+require 'toy/identity/incremented_key_factory'
+
 module Delayed
   module Backend
     module Redis
       class Job
-        attr_accessor :priority
-        attr_accessor :attempts
-        attr_accessor :handler
-        attr_accessor :last_error
-        attr_accessor :run_at
-        attr_accessor :locked_at # not really relevant but the worker requires it
-        attr_accessor :locked_by 
-        attr_accessor :failed_at
-        attr_accessor :queue
-        
         include Delayed::Backend::Base
+        include Toy::Store
+        
+        attribute :priority, Integer
+        attribute :attempts, Integer
+        attribute :handler, String
+        attribute :last_error, String
+        attribute :run_at, Time
+        attribute :locked_at, Time
+        attribute :locked_by, String
+        attribute :failed_at, Time
+        attribute :queue, String
+                
+        before_create do |o|
+          o.attempts   = 0
+          o.priority ||= 0
+          o.run_at   ||= self.class.db_time_now
+          self.class.push(o)
+        end
         
         # Accepts:
         #   1. A 'hostname:port' String
@@ -39,17 +50,16 @@ module Delayed
             @redis = server
           else
             @redis = ::Redis::Namespace.new(:delayed_job, :redis => server)
-          end          
+          end         
+          
+          @redis.tap do |redis|
+            store :redis, redis
+            key Toy::Identity::IncrementedKeyFactory.new(redis)
+          end
         end
 
         def self.redis
           @redis
-        end
-        
-        def initialize(hash = {})
-          self.attempts = 0
-          self.priority = 0
-          hash.each{|k,v| send(:"#{k}=", v)}
         end
         
         class << self
@@ -71,14 +81,6 @@ module Delayed
           def queues
             redis.smembers('queues') || []
           end
-        
-          def create(attrs = {})
-            new(attrs).tap do |o|
-              o.save
-            end
-          end
-                  
-          def create!(*args); create(*args); end
                    
           # jobs are never locked
           def clear_locks!(worker_name)
@@ -93,21 +95,24 @@ module Delayed
           end
             
           def push(job)
-            if (job.run_at && job.run_at > Time.current)
+            if (job.run_at && job.run_at > db_time_now)
               delayed_push(job)
             else
               immediate_push(job)
             end
           end
 
+          def db_time_now
+            Time.current
+          end
+          
           private
           
             def pop(queue)
               repush_ready_jobs
               
-              result = redis.lpop(queue_key(queue))
-              result = YAML.load(result) if result
-              result
+              id = redis.lpop(queue_key(queue))
+              get(id) if id
             end
             
             def add_queue(queue)
@@ -132,12 +137,12 @@ module Delayed
             
             def immediate_push(job)
               add_queue(job.queue)
-              redis.rpush(queue_key(job.queue), YAML.dump(job))
+              redis.rpush(queue_key(job.queue), job.id)
             end
             
             def delayed_push(job)
               # Add the job to a list for a particular timestamp and record the timestamp in a queue
-              redis.rpush(timestamp_key(job.run_at), YAML.dump(job))
+              redis.rpush(timestamp_key(job.run_at), job.id)
               redis.zadd("timestamps", job.run_at.to_i, job.run_at.to_i)
             end
             
@@ -148,12 +153,12 @@ module Delayed
             end
             
             def ready_timestamps
-              redis.zrangebyscore "timestamps", 0, Time.current.to_i
+              redis.zrangebyscore "timestamps", 0, db_time_now.to_i
             end
                         
             def repush_jobs_for_timestamp(time_i)
-              while job = redis.lpop(timestamp_key(time_i))
-                immediate_push(YAML.load(job))
+              while id = redis.lpop(timestamp_key(time_i))
+                immediate_push(self.class.get(id))
               end                            
               redis.zrem("timestamps", time_i)
             end
@@ -165,38 +170,10 @@ module Delayed
           self.locked_by = worker.name
           return true
         end
-
-        def self.db_time_now
-          Time.current
-        end
-        
-        def update_attributes(attrs = {})
-          attrs.each{|k,v| send(:"#{k}=", v)}
-          save
-        end
-        
-        # Destroy is handled by not writing the job back to the queue
-        def destroy
-          true
-        end
-        
-        def save
-          raise "Double save. Would create duplicate job." if @saved
-          self.queue  ||= 'default'
-          self.class.push(self)
-          @saved = true
-          true
-        end
-        
-        def save!; save; end
-        
-        def fail!
-          destroy
-        end
            
         def reload
           reset
-          self
+          super
         end
         
         private

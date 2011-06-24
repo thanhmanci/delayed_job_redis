@@ -68,6 +68,10 @@ module Delayed
         end
         
         class << self
+          def after_fork
+            redis.client.disconnect
+          end
+          
           def count
             queues.map{ |q| redis.llen(queue_key(q)) }.sum
           end

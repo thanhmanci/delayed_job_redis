@@ -24,3 +24,4 @@ Viximo, Inc.
 
 Obviously, this implementation is highly influenced by Github's Resque project and portions may have
 been copied wholesale.
+hcvbn
